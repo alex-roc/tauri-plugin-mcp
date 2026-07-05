@@ -2,25 +2,65 @@
 
 A Tauri plugin and MCP server that allow AI agents such as Cursor and Claude Code to interact with and debug your Tauri application through screenshots, DOM access, input simulation, and more.
 
+> **About this fork** (maintained by [alex-roc](https://github.com/alex-roc), based on
+> [P3GLEG/tauri-plugin-mcp](https://github.com/P3GLEG/tauri-plugin-mcp)). It fixes the
+> defects that made autonomous agent testing unreliable, verified end-to-end on macOS
+> against a real Tauri v2 + React app:
+>
+> - **`execute_js` returns real values.** Statement code (`const a = 2; a + 40;`) returns
+>   its completion value instead of `"undefined"`; a runtime error no longer re-executes
+>   the code as statements (which duplicated side effects); and Promise results are
+>   awaited before serializing.
+> - **Clicks that React actually sees.** Selector-based `click` dispatches the full
+>   synthetic pointer+mouse sequence in-page (pointerdown/mousedown/pointerup/mouseup/
+>   click|contextmenu|dblclick, `composed`, correct `button`/`buttons`/`detail`), with
+>   left/right/middle and single/double support. The upstream native NSEvent path lost
+>   events when the window wasn't key and mixed document/viewport coordinates; it is
+>   kept only for raw x/y clicks.
+> - **Screenshots of *your* window, not the frontmost app.** On macOS the window is
+>   captured by its own CGWindowID (`kCGWindowListOptionIncludingWindow`) instead of
+>   title-matching across all apps with a flag that ignored the window id.
+>
+> Known synthetic-event limits (any in-page automation has them): double-click does not
+> produce native word selection (set a Range via `execute_js` instead), and native
+> dialogs/menus are not DOM — design your app with dev-only test hooks for those flows.
+
 ## Install
 
-### npm (guest-js bindings)
-```bash
-npm install tauri-plugin-mcp
-```
-
-### MCP Server CLI
-```bash
-npm install -g tauri-plugin-mcp-server
-# or run directly
-npx tauri-plugin-mcp-server
-```
+Pin to a commit (`rev`) you have reviewed — this tooling runs inside your app in dev.
 
 ### Rust (Cargo)
-*Coming soon to crates.io.* For now, use a git dependency:
 ```toml
 [dependencies]
-tauri-plugin-mcp = { git = "https://github.com/P3GLEG/tauri-plugin-mcp" }
+# dev-only automation; compile it behind an optional feature
+tauri-plugin-mcp = { git = "https://github.com/alex-roc/tauri-plugin-mcp", rev = "<REV>", optional = true }
+
+[features]
+automation = ["dep:tauri-plugin-mcp"]
+```
+
+### Guest JS bindings (frontend)
+Do **not** use the `tauri-plugin-mcp` npm package (upstream, without these fixes).
+Install from git — the `prepare` script builds `dist-js` on install:
+```bash
+pnpm add -D "tauri-plugin-mcp@github:alex-roc/tauri-plugin-mcp#<REV>"
+```
+With pnpm, allow the build script in `pnpm-workspace.yaml`:
+```yaml
+allowBuilds:
+  "tauri-plugin-mcp@https://codeload.github.com/alex-roc/tauri-plugin-mcp/tar.gz/<REV>": true
+onlyBuiltDependencies:
+  - tauri-plugin-mcp
+```
+
+### MCP server
+Do **not** use `npx tauri-plugin-mcp-server` (upstream npm package: broken bin without
+a shebang, and no fixes). Build it from this repo:
+```bash
+git clone https://github.com/alex-roc/tauri-plugin-mcp && cd tauri-plugin-mcp
+git checkout <REV>
+cd mcp-server-ts && npm install && npm run build
+# entry point: mcp-server-ts/build/index.js  (register it with your MCP client)
 ```
 
 ## Tools
