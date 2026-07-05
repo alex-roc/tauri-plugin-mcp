@@ -4,14 +4,15 @@ use image;
 use log::{debug, info, error};
 use tauri::Runtime;
 use core_graphics::display::{
-    CGWindowListCopyWindowInfo, kCGWindowListOptionAll, kCGWindowListExcludeDesktopElements,
+    CGWindowListCopyWindowInfo, kCGWindowListOptionAll, kCGWindowListOptionIncludingWindow,
+    kCGWindowListExcludeDesktopElements,
     kCGNullWindowID, CGWindowListCreateImage, CGRect, CGPoint, CGSize,
     kCGWindowImageDefault, kCGWindowImageBoundsIgnoreFraming,
 };
 use core_graphics::base::CGFloat;
 
 // Import shared functionality
-use crate::desktop::ScreenshotContext;
+use crate::desktop::{ScreenshotContext, WindowHandle};
 use crate::platform::shared::{finalize_screenshot, get_window_title_from_handle, handle_screenshot_task};
 use crate::shared::ScreenshotParams;
 
@@ -144,9 +145,12 @@ fn capture_window_by_id(window_id: u32, bounds: (f64, f64, f64, f64)) -> Result<
     };
 
     unsafe {
+        // kCGWindowListOptionIncludingWindow captures exactly this window_id.
+        // kCGWindowListOptionAll (= 0) would composite everything on screen
+        // inside `rect` — i.e. whatever app happens to be in front.
         let image_ref = CGWindowListCreateImage(
             rect,
-            kCGWindowListOptionAll,
+            kCGWindowListOptionIncludingWindow,
             window_id,
             kCGWindowImageDefault | kCGWindowImageBoundsIgnoreFraming,
         );
@@ -207,8 +211,34 @@ pub async fn take_screenshot<R: Runtime>(
     // Get window title from the handle (works with both Window and WebviewWindow)
     let window_title = get_window_title_from_handle(&window_context.window_handle)?;
 
+    // Our own CGWindowID (== NSWindow.windowNumber): capturing by it targets THIS
+    // window regardless of z-order or focus. Title matching (below) can hit a
+    // window of another app whose title contains ours (terminal, browser tab).
+    let own_window_id: Option<u32> = {
+        let ptr = match &window_context.window_handle {
+            WindowHandle::WebviewWindow(w) => w.ns_window().ok(),
+            WindowHandle::Window(w) => w.ns_window().ok(),
+        };
+        ptr.filter(|p| !p.is_null()).and_then(|p| {
+            u32::try_from(unsafe { crate::native_input::backend::get_window_number(p) }).ok()
+        })
+    };
+
     handle_screenshot_task(move || {
         info!("[TAURI-MCP] Looking for window with title: {} (label: {})", window_title, window_label);
+
+        if let Some(own_id) = own_window_id {
+            if let Some(window_info) = get_all_windows_cg().into_iter().find(|w| w.window_id == own_id) {
+                info!("[TAURI-MCP] Capturing own window by id={} directly", own_id);
+                match capture_window_by_id(own_id, window_info.bounds) {
+                    Ok(image) => {
+                        info!("[TAURI-MCP] Successfully captured own window: {}x{}", image.width(), image.height());
+                        return finalize_screenshot(image::DynamicImage::ImageRgba8(image), &params_clone);
+                    }
+                    Err(e) => info!("[TAURI-MCP] Own-window capture failed ({}), falling back to title matching", e),
+                }
+            }
+        }
 
         // First try xcap (works for most windows)
         let xcap_windows = xcap::Window::all().unwrap_or_default();

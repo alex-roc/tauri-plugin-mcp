@@ -160,8 +160,9 @@ unsafe fn get_content_height(ns_window: Id) -> f64 {
     }
 }
 
-/// Get the window number for an NSWindow.
-unsafe fn get_window_number(ns_window: Id) -> i64 {
+/// Get the window number for an NSWindow. The window number IS the CGWindowID,
+/// which lets the screenshot path capture our own window without title matching.
+pub(crate) unsafe fn get_window_number(ns_window: Id) -> i64 {
     unsafe {
         let f: MsgSendI64 = std::mem::transmute(objc_msgSend as *const c_void);
         f(ns_window, sel(b"windowNumber\0"))

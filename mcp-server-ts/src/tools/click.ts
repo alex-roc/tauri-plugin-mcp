@@ -46,34 +46,33 @@ export function registerClickTool(server: McpServer) {
         let targetY = params.y;
         const windowLabel = params.window_label;
 
-        // If selector provided, resolve coordinates first
+        // Selector-based clicks go through the guest JS (full pointer+mouse
+        // event sequence on the element itself, incl. right/middle/double).
+        // The native NSEvent path is unreliable here: synthetic events get
+        // swallowed by AppKit when the window isn't key, and document/viewport
+        // coordinate mismatches land the click on the wrong element.
         if (params.selector_type && params.selector_value) {
-          const findPayload = {
+          const clickPayload = {
             selector_type: params.selector_type,
             selector_value: params.selector_value,
             window_label: windowLabel ?? "main",
-            should_click: false,
+            should_click: true,
+            click_button: params.button ?? "left",
+            click_type: params.click_type ?? "single",
           };
-          logCommandParams('get_element_position', findPayload);
-          const findResult = await socketClient.sendCommand('get_element_position', findPayload);
-
-          if (!findResult || typeof findResult !== 'object') {
-            return createErrorResponse('Failed to find element');
+          logCommandParams('get_element_position', clickPayload);
+          const result = await socketClient.sendCommand('get_element_position', clickPayload);
+          if (result && typeof result === 'object' && 'success' in result && !result.success) {
+            return createErrorResponse(result.error || 'Failed to click element');
           }
-
-          // Check for error in response
-          if ('success' in findResult && !findResult.success) {
-            return createErrorResponse(findResult.error || 'Failed to find element');
-          }
-
-          const coords = extractCoordinates(findResult);
-          if (!coords) {
-            return createErrorResponse(`Could not extract coordinates from element response: ${JSON.stringify(findResult)}`);
-          }
-          targetX = Math.round(coords.x);
-          targetY = Math.round(coords.y);
+          const variant = `${params.button ?? 'left'} ${params.click_type ?? 'single'}`;
+          return createSuccessResponse(
+            `Clicked element ${params.selector_type}="${params.selector_value}" (${variant}, in-page event dispatch)`
+          );
         }
 
+        // Raw x/y coordinates: native NSEvent path (real hit-testing; needed for
+        // coordinate-level interactions where no DOM selector applies).
         if (targetX === undefined || targetY === undefined) {
           return createErrorResponse("Either x/y coordinates or selector_type/selector_value must be provided");
         }

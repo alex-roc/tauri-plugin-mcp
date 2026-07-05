@@ -227,7 +227,7 @@ async function handleGetElementPositionRequest(event: any) {
     const correlationId = getCorrelationId(event.payload);
 
     try {
-        const { selectorType, selectorValue, shouldClick = false } = event.payload;
+        const { selectorType, selectorValue, shouldClick = false, clickButton, clickType } = event.payload;
 
         // Find the element based on the selector type
         let element = null;
@@ -333,7 +333,7 @@ async function handleGetElementPositionRequest(event: any) {
         // Click the element if requested
         let clickResult = null;
         if (shouldClick) {
-            clickResult = clickElement(element, elementViewportCssX, elementViewportCssY);
+            clickResult = clickElement(element, elementViewportCssX, elementViewportCssY, clickButton, clickType);
         }
 
         await emitResponse('get-element-position-response', correlationId, {
@@ -443,8 +443,9 @@ function findElementByText(text: string): Element | null {
     return null;
 }
 
-// Helper function to click an element
-function clickElement(element: Element, centerX: number, centerY: number) {
+// Helper function to click an element. Supports left/right/middle button and
+// single/double clicks via full synthetic pointer+mouse sequences.
+function clickElement(element: Element, centerX: number, centerY: number, clickButton?: string, clickType?: string) {
     try {
         // Explicitly focus the element before dispatching mouse events.
         // Synthetic dispatchEvent() does NOT trigger the browser's native focus
@@ -461,35 +462,45 @@ function clickElement(element: Element, centerX: number, centerY: number) {
             _lastFocusedElement = element;
         }
 
-        // Create and dispatch mouse events
-        const mouseDown = new MouseEvent('mousedown', {
+        // Dispatch the full pointer+mouse sequence a real click produces.
+        // Mouse events alone miss React/Radix components listening on pointer
+        // events, and composed:true is required to cross shadow DOM boundaries.
+        const button = clickButton === 'right' ? 2 : clickButton === 'middle' ? 1 : 0;
+        const buttonsMask = button === 2 ? 2 : button === 1 ? 4 : 1;
+        const clicks = clickType === 'double' ? 2 : 1;
+
+        const makeBase = (detail: number) => ({
             bubbles: true,
             cancelable: true,
+            composed: true,
             view: window,
             clientX: centerX,
-            clientY: centerY
+            clientY: centerY,
+            button,
+            detail
+        });
+        const makePointer = (detail: number) => ({
+            ...makeBase(detail),
+            pointerId: 1,
+            pointerType: 'mouse',
+            isPrimary: true
         });
 
-        const mouseUp = new MouseEvent('mouseup', {
-            bubbles: true,
-            cancelable: true,
-            view: window,
-            clientX: centerX,
-            clientY: centerY
-        });
-
-        const click = new MouseEvent('click', {
-            bubbles: true,
-            cancelable: true,
-            view: window,
-            clientX: centerX,
-            clientY: centerY
-        });
-
-        // Dispatch the events
-        element.dispatchEvent(mouseDown);
-        element.dispatchEvent(mouseUp);
-        element.dispatchEvent(click);
+        for (let i = 1; i <= clicks; i++) {
+            element.dispatchEvent(new PointerEvent('pointerdown', { ...makePointer(i), buttons: buttonsMask }));
+            element.dispatchEvent(new MouseEvent('mousedown', { ...makeBase(i), buttons: buttonsMask }));
+            element.dispatchEvent(new PointerEvent('pointerup', { ...makePointer(i), buttons: 0 }));
+            element.dispatchEvent(new MouseEvent('mouseup', { ...makeBase(i), buttons: 0 }));
+            if (button === 2) {
+                // Right click: the DOM-level outcome is a contextmenu event
+                element.dispatchEvent(new PointerEvent('contextmenu', { ...makePointer(i), buttons: 0 }));
+            } else {
+                element.dispatchEvent(new PointerEvent('click', { ...makePointer(i), buttons: 0 }));
+            }
+        }
+        if (button === 0 && clicks === 2) {
+            element.dispatchEvent(new MouseEvent('dblclick', { ...makeBase(2), buttons: 0 }));
+        }
 
         return {
             success: true,
@@ -1375,8 +1386,9 @@ async function handleJsExecutionRequest(event: any) {
             ? event.payload._payload
             : event.payload;
 
-        // Execute the code
-        const result = executeJavaScript(code);
+        // Execute the code (awaiting promises so async results serialize properly)
+        let result = executeJavaScript(code);
+        if (result instanceof Promise) result = await result;
 
         // Prepare response with result and type information
         const response = {
@@ -1403,15 +1415,20 @@ async function handleJsExecutionRequest(event: any) {
 
 // Function to safely execute JavaScript code
 function executeJavaScript(code: string): any {
-    // Using Function constructor is slightly safer than eval
-    // It runs in global scope rather than local scope
+    // Compile-only in the try: a runtime error from invoking here would fall
+    // through to the statement path and execute the code a second time
+    // (duplicated side effects). The trailing \n guards a final // comment.
+    let fn: Function;
     try {
         // For expressions, return the result
-        return new Function(`return (${code})`)();
+        fn = new Function(`return (${code}\n)`);
     } catch {
-        // If that fails, try executing as statements
-        return new Function(code)();
+        // Statements (const/let, multiple statements, trailing ';'): indirect
+        // eval preserves the completion value of the last statement, like
+        // DevTools — a bare `new Function(code)()` would return undefined.
+        fn = new Function(`return eval(${JSON.stringify(code)})`);
     }
+    return fn();
 }
 
 async function handleSendTextToElementRequest(event: any) {

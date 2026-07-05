@@ -310,6 +310,12 @@ struct GetElementPositionPayload {
     should_click: bool,
     #[serde(default)]
     raw_coordinates: bool,
+    // In-page click variants (used when should_click): "left" | "right" | "middle",
+    // "single" | "double". Defaults preserve the original behavior.
+    #[serde(default)]
+    click_button: Option<String>,
+    #[serde(default)]
+    click_type: Option<String>,
 }
 
 pub async fn handle_get_element_position<R: Runtime>(
@@ -327,7 +333,9 @@ pub async fn handle_get_element_position<R: Runtime>(
         "selectorType": parsed.selector_type,
         "selectorValue": parsed.selector_value,
         "shouldClick": parsed.should_click,
-        "rawCoordinates": parsed.raw_coordinates
+        "rawCoordinates": parsed.raw_coordinates,
+        "clickButton": parsed.click_button,
+        "clickType": parsed.click_type
     });
 
     match emit_and_wait(
